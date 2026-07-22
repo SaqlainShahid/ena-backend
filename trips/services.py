@@ -1,4 +1,5 @@
 import json
+import math
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +58,16 @@ def search_locations(query):
     return results
 
 
+def _distance_km(first, second):
+    """Return the great-circle distance between two lon/lat points."""
+    lat1, lon1 = math.radians(first["lat"]), math.radians(first["lon"])
+    lat2, lon2 = math.radians(second["lat"]), math.radians(second["lon"])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    value = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 6371.0088 * 2 * math.atan2(math.sqrt(value), math.sqrt(1 - value))
+
+
 def _route(points):
     coordinates = ";".join(f"{point['lon']},{point['lat']}" for point in points)
     url = f"https://router.project-osrm.org/route/v1/driving/{coordinates}?overview=full&geometries=geojson&steps=false"
@@ -67,6 +78,22 @@ def _route(points):
     legs = route.get("legs", [])
     if len(legs) != len(points) - 1:
         raise TripError("The routing service returned an incomplete route.")
+    snapped_waypoints = data.get("waypoints", [])
+    if len(snapped_waypoints) != len(points):
+        raise TripError("The routing service returned incomplete location data.")
+    for point, waypoint in zip(points, snapped_waypoints):
+        location = waypoint.get("location", [])
+        if len(location) != 2:
+            raise TripError("The routing service returned invalid location data.")
+        snapped = {"lon": float(location[0]), "lat": float(location[1])}
+        # OSRM can return an apparently successful route while snapping a
+        # location across an ocean to the nearest supported road. Reject it
+        # instead of drawing a misleading route on the map.
+        if _distance_km(point, snapped) > 100:
+            raise TripError(
+                f"No drivable road route could be found to {point['label']}. "
+                "Check the location or use locations connected by roads."
+            )
     normalized_legs = [
         {
             "distance_miles": round(leg.get("distance", 0) / 1609.344, 2),
